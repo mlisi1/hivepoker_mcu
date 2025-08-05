@@ -1,5 +1,5 @@
 repositories:
   hivepoker_actions:
     type: git
-    url: https://github.com/mlisi1/hivepoker_actions
+    url: https://github.com/mlisi1/hivepoker_interfaces
     version: main

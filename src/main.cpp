@@ -1,385 +1,480 @@
-// #include <Arduino.h>
+#include <Arduino.h>
+
+//MICROROS
+#include <micro_ros_platformio.h>
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rcutils/logging.h>
+#include <rclc/executor.h>
+//INTERFACES
+#include <std_msgs/msg/string.h>
+#include <hivepoker_interfaces/msg/arms_positions.h>
+#include <hivepoker_interfaces/msg/state.h>
+#include <hivepoker_interfaces/srv/move.h>
+#include <hivepoker_interfaces/srv/stop.h>
+//I2C EXTENDER
+#include <Wire.h>
+#include <Adafruit_PCF8575.h>
+//SEPPERS
+#include <ESP_FlexyStepper.h>
+//MISC
+#include <pthread.h>
+#include <logger.h>
+//HARDWARE
+#include <pin_definitions.h>
+#include <parameters.h>
+
+
+#define STR_SIZE 500
+
+
+//STEPPER DEFINITIONS ===============================================================================================================================================
+ESP_FlexyStepper x1_driver;
+ESP_FlexyStepper y1_driver;
+
+
+// I2C DEFINITIONS ===============================================================================================================================================
+Adafruit_PCF8575 pcf8575;
+
+//MICROROS DEFINITIONS ===============================================================================================================================================
+hivepoker_interfaces__srv__Move_Request request_msg_move;
+hivepoker_interfaces__srv__Move_Response response_msg_move;
+hivepoker_interfaces__srv__Stop_Request request_msg_stop;
+hivepoker_interfaces__srv__Stop_Response response_msg_stop;
+hivepoker_interfaces__msg__ArmsPositions state;
+rcl_publisher_t state_publisher, log_pub;
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+rcl_service_t move_srv, stop_srv;
+rcl_timer_t timer;
+const unsigned int timer_timeout =300; //ms
+std_msgs__msg__String log_msg;
+
+
+
+//ENDSTOP DEFINITIONS ===============================================================================================================================================
+volatile bool left_endstop_triggered = false;
+TaskHandle_t xLeftEndstopTaskHandle = NULL;
+volatile bool right_endstop_triggered = false;
+TaskHandle_t xRightEndstopTaskHandle = NULL;
+
 
-// #include <micro_ros_platformio.h>
 
-// #include <rcl/rcl.h>
-// #include <rclc/rclc.h>
-// #include <rcutils/logging.h>
-// #include <rclc/executor.h>
+//MICROROS FUNCTIONS ===============================================================================================================================================
 
-// #include <std_msgs/msg/string.h>
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop(temp_rc);}}
+#define RCSOFTCHECK(fn) {rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) {hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING,  \
+        "Failed status on line %d: %d. Continuing.\n", __LINE__, (int)temp_rc);}}
+
+// --------------------------------------------------------------------------------------------------------------------------------
+void error_loop(rcl_ret_t err){
+  while(1){
+    hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR,  \
+        "Failed status on line %d: %d. Aborting.\n", __LINE__, (int)err);
+    delay(1000);
+  }
+}
 
-// #include <logger.h>
+// --------------------------------------------------------------------------------------------------------------------------------
 
-// // #include <example_interfaces/action/fibonacci.h>
-// #include <hivepoker_actions/action/move_end_effector.h>
+void move_callback(const void * request_msg, void * response_msg){
+  // Cast messages to expected types
+  const hivepoker_interfaces__srv__Move_Request * req_in = (const hivepoker_interfaces__srv__Move_Request *)request_msg;
+  hivepoker_interfaces__srv__Move_Response * res_in = (hivepoker_interfaces__srv__Move_Response *)response_msg;
 
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Received Move Request: x=%.2f, y=%.2f", req_in->x, req_in->y);
 
-// #include <Stepper.h>
-// #include <pthread.h>
-// #include "esp_heap_caps.h"
-// #include <math.h>
+  state.arm1.state = hivepoker_interfaces__msg__State__MOVING;
 
+  digitalWrite(X1_SLEEP_PIN, HIGH);
+  digitalWrite(Y1_SLEEP_PIN, HIGH);
 
-// const int stepsPerRevolution = 200;
-// bool move_ee_goal_active = false;
+  float x = -req_in->x;
+  float y = req_in->y;
 
-// bool limit_triggered = false;
+  if (x<0 && left_endstop_triggered) {
+    res_in->success = false;
+    return;
+  }
 
-// #define STR_SIZE 500
-// #define DRV833_IN1 12
-// #define DRV833_IN2 14
-// #define DRV833_IN3 27
-// #define DRV833_IN4 26
+  if (x>420.0 && right_endstop_triggered) {
+    res_in->success = false;
+    return;
+  }
 
-// #define LIMIT 34
 
+  x1_driver.setTargetPositionInMillimeters(req_in->x);
+  y1_driver.setTargetPositionInMillimeters(req_in->y);
 
-// volatile bool endstop_triggered = false;
-// TaskHandle_t xEndstopTaskHandle = NULL;
+  do {
 
+    left_endstop_triggered = false;
+    right_endstop_triggered = false;
+    // if (left_endstop_triggered) {
+    //   x1_driver.emergencyStop();
+    //   break;
+    // }
+    // if (right_endstop_triggered) {
+    //   x1_driver
+    // }
+    // x1_driver.processMovement();
+    // y1_driver.processMovement();
+    state.arm1.pos_x = x1_driver.getCurrentPositionInMillimeters();
+    state.arm1.pos_y = y1_driver.getCurrentPositionInMillimeters();
+    state.arm1.vel_x = x1_driver.getCurrentVelocityInMillimetersPerSecond();
+    state.arm1.vel_y = y1_driver.getCurrentVelocityInMillimetersPerSecond();
+    RCCHECK(rcl_publish(&state_publisher, &state, NULL));
 
-// void IRAM_ATTR endstop_isr() {
-//   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  } while (
+    abs(x1_driver.getDistanceToTargetSigned()) > 0.0 ||
+    abs(y1_driver.getDistanceToTargetSigned()) > 0.0
+  );
+  state.arm1.state = hivepoker_interfaces__msg__State__IDLE;
 
-//   if (xEndstopTaskHandle != NULL) {
-//     vTaskNotifyGiveFromISR(xEndstopTaskHandle, &xHigherPriorityTaskWoken);
-//     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-//   }
-// }
+  digitalWrite(X1_SLEEP_PIN, LOW);
+  digitalWrite(Y1_SLEEP_PIN, LOW);
 
 
+  res_in->success = true;
 
+}
 
-// void endstop_task(void *param) {
-//   while (1) {
-//     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // Wait for interrupt
+// --------------------------------------------------------------------------------------------------------------------------------
 
-//     limit_triggered = !limit_triggered;
+void stop_callback(const void * request_msg, void * response_msg){
+  // Cast messages to expected types
+  const hivepoker_interfaces__srv__Stop_Request * req_in = (const hivepoker_interfaces__srv__Stop_Request *)request_msg;
+  hivepoker_interfaces__srv__Stop_Response * res_in = (hivepoker_interfaces__srv__Stop_Response *)response_msg;
 
-//     hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Endstop: %d", limit_triggered);
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Received Stop Request");
+  x1_driver.emergencyStop();
+  y1_driver.emergencyStop();
 
-//   }
-// }
+  res_in->success = true;
 
-// Stepper myStepper(stepsPerRevolution, DRV833_IN1, DRV833_IN2, DRV833_IN3, DRV833_IN4);
+}
 
+// --------------------------------------------------------------------------------------------------------------------------------
 
-// rcl_publisher_t publisher, log_pub;
-// rclc_executor_t executor;
-// rclc_support_t support;
-// rcl_allocator_t allocator;
-// rcl_node_t node;
+void publishState(rcl_timer_t *timer, int64_t last_call_time) {
 
-// rcl_timer_t timer;
-// const unsigned int timer_timeout = 1000; //ms
+  state.arm1.pos_x = x1_driver.getCurrentPositionInMillimeters();
+  state.arm1.pos_y = y1_driver.getCurrentPositionInMillimeters();
 
+  RCCHECK(rcl_publish(&state_publisher, &state, NULL));
+  // hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Current position: x=%.2f, y=%.2f", state.arm1.x, state.arm1.y);
+  // vTaskDelay(pdMS_TO_TICKS(200));  // 200 ms delay
+}
 
-// rclc_action_server_t action_server;
-// hivepoker_actions__action__MoveEndEffector_SendGoal_Request  ros_goal_request[1];
-// hivepoker_actions__action__MoveEndEffector_GetResult_Response response;
-// rclc_action_goal_handle_t *g_goal_handle = NULL;
 
-// std_msgs__msg__String log_msg;
+// --------------------------------------------------------------------------------------------------------------------------------
 
 
-// // #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop(temp_rc);}}
-// // #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+void logCallback(hivepoker::Logger::LogLevel level, const std::string& message) {    
 
 
-// #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop(temp_rc);}}
-// #define RCSOFTCHECK(fn) {rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) {hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING,  \
-//         "Failed status on line %d: %d. Continuing.\n", __LINE__, (int)temp_rc);}}
+    std::string prefix = hivepoker::Logger::getLogLevelPrefix(level);
+    std::string msg_string = prefix + message;
+    sprintf(log_msg.data.data, msg_string.c_str());
+    log_msg.data.size = strlen(log_msg.data.data);
 
+    RCSOFTCHECK(rcl_publish(&log_pub, &log_msg, NULL));
 
-// void error_loop(rcl_ret_t err){
-//   while(1){
-//     // hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Error Loop %s", rcl_get_error_string());
-//     hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR,  \
-//         "Failed status on line %d: %d. Aborting.\n", __LINE__, (int)err);
-//     delay(1000);
-//   }
-// }
 
+}
 
 
-// void logCallback(hivepoker::Logger::LogLevel level, const std::string& message) {    
 
+//LEFT ENDSTOP FUNCTIONS ===============================================================================================================================================
+void IRAM_ATTR left_endstop_isr() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-//     std::string prefix = hivepoker::Logger::getLogLevelPrefix(level);
-//     std::string msg_string = prefix + message;
-//     sprintf(log_msg.data.data, msg_string.c_str());
-//     log_msg.data.size = strlen(log_msg.data.data);
+  if (xLeftEndstopTaskHandle != NULL) {
+    vTaskNotifyGiveFromISR(xLeftEndstopTaskHandle, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+  }
+}
 
-//     RCSOFTCHECK(rcl_publish(&log_pub, &log_msg, NULL));
-//     // delay(10);
 
-// }
+void IRAM_ATTR right_endstop_isr() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
+  if (xRightEndstopTaskHandle != NULL) {
+    vTaskNotifyGiveFromISR(xRightEndstopTaskHandle, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+  }
+}
 
 
 
 
+void left_endstop_task(void *param) {
+  while (1) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // Wait for interrupt
+    left_endstop_triggered = true;
+    if (!left_endstop_triggered) {
+      x1_driver.emergencyStop();
+      x1_driver.setCurrentPositionInMillimeters(0.0);
+      // enable_left = false;
+    }    
+    // hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Left Endstop Triggered");
+    // RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
 
-// void * move_ee_worker(void * args)
-// {
-// // (void) args;
-// rclc_action_goal_handle_t * goal_handle = (rclc_action_goal_handle_t *) args;
-// rcl_action_goal_state_t goal_state = GOAL_STATE_SUCCEEDED;
+  }
+}
 
-// hivepoker_actions__action__MoveEndEffector_SendGoal_Request * req =
-//   (hivepoker_actions__action__MoveEndEffector_SendGoal_Request *) goal_handle->ros_goal_request;
 
-// hivepoker_actions__action__MoveEndEffector_GetResult_Response response;
-// hivepoker_actions__action__MoveEndEffector_GetResult_Response feedback;
+void right_endstop_task(void *param) {
+  while (1) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // Wait for interrupt
+    right_endstop_triggered = true;
+    if (!right_endstop_triggered) {
+      x1_driver.emergencyStop();
+      // x1_driver.setCurrentPositionInMillimeters(-420.0);
+      // enable_right = false;
+    }    
+    // hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Right Endstop Triggered");
+    // RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
 
-// hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Started worker thread");
-// usleep(1e5);
+  }
+}
 
-// response.result.success = true;
 
-// rcl_ret_t rc;
-// do {
-//   rc = rclc_action_send_result(goal_handle, goal_state, &response);
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Trying to send result - %s", rc);
-//   usleep(1e6);
-// } while (rc != RCL_RET_OK);
 
-// pthread_exit(NULL);
-// }
 
 
 
 
 
 
-// void goal_callback(rcl_timer_t * timer, int64_t last_call_time)
-// {
-// 	(void) last_call_time;
 
-//   if (timer == NULL || !move_ee_goal_active || g_goal_handle == NULL) {
-//         response.result.success = false;
-//         return;
-//   }
 
-//   rcl_action_goal_state_t goal_state = GOAL_STATE_SUCCEEDED;
 
-//   move_ee_goal_active = false;
 
-//   hivepoker_actions__action__MoveEndEffector_SendGoal_Request * req =
-//     (hivepoker_actions__action__MoveEndEffector_SendGoal_Request *) g_goal_handle->ros_goal_request;
 
-//   response.result.success = true;
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Requested position - X: %f, Y: %f", req->goal.ee_position[0], req->goal.ee_position[1]);
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Executing action");
-//   int steps = static_cast<int>(req->goal.ee_position[0]);
-//   int s = (steps > 0) - (steps < 0);
-//   int halved = static_cast<int>(steps/2);
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Turning the motor for %d steps; sign: %d", steps, s);
-
-//   for (int i=0; i<abs(halved); i++) {    
-
-//     if (limit_triggered) {
-//       goal_state = GOAL_STATE_ABORTED;
-//       break;
-//     }
-
-//     myStepper.step(s * 2);
-
-//   }
- 
-//   // myStepper.step(steps);
-//   // if (req->goal.ee_position[0] >= 0.0) {
-    
-//   //   myStepper.step(400);
-//   // } else {
-//   //   myStepper.step(-400);
-//   // }
-//   // rclc_action_send_result(g_goal_handle, GOAL_STATE_SUCCEEDED, &response);
-//   rcl_ret_t rc;
-//   do {
-//     rc = rclc_action_send_result(g_goal_handle, goal_state, &response);
-//     hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Trying to send result - %d", rc);
-//     RCSOFTCHECK(rclc_executor_spin_one_period(&executor, RCL_MS_TO_NS(10)));
-//     vTaskDelay(pdMS_TO_TICKS(100));
-//   } while (rc != RCL_RET_OK);
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Action executed");
-//   g_goal_handle = NULL;
-//   return;
-// }
-
-
-
-
-
-// rcl_ret_t handle_goal(rclc_action_goal_handle_t * goal_handle, void * context)
-// {
-
-//   (void) context;
-
-//   hivepoker_actions__action__MoveEndEffector_SendGoal_Request * req =
-//     (hivepoker_actions__action__MoveEndEffector_SendGoal_Request *) goal_handle->ros_goal_request;
-
-//   g_goal_handle = goal_handle;
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Accepted action");
-
-//   move_ee_goal_active = true;
-
-//   return RCL_RET_ACTION_GOAL_ACCEPTED;
-// }
-
-
-
-
-
-
-// bool handle_cancel(rclc_action_goal_handle_t * goal_handle, void * context)
-// {
-//   (void) context;
-//   (void) goal_handle;
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Action canceled");
-
-//   return true;
-// }
-
-
-
-
-
-
-// void setup() {
-
-//   // Serial.begin(115200);
-//   // set_microros_serial_transports(Serial);
-
-//   IPAddress ip(192, 168, 0, 103);
-//   uint16_t port = 8888;
-//   set_microros_wifi_transports("Tenda_30AE50", "CreativeLab2025?", ip, port);
-  
-//   delay(500);
-
-
-  
-
-
-//   myStepper.setSpeed(60); // rpm
-
-
-//   allocator = rcl_get_default_allocator();
-
-//   log_msg.data.data = (char * ) malloc(STR_SIZE * sizeof(char));
-//   log_msg.data.size = 0;
-//   log_msg.data.capacity = STR_SIZE;
-
-//   hivepoker::Logger::setLogLevel(hivepoker::Logger::LogLevel::INFO);
-//   hivepoker::Logger::setLogCallback(logCallback);
-
-//   pinMode(LIMIT, INPUT_PULLDOWN);
-  
-
-//   //create init_options
-//   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
-
-//   // create node
-//   RCCHECK(rclc_node_init_default(&node, "hivepoker", "", &support));
-
-//   // create publisher
-//   RCCHECK(rclc_publisher_init_default(
-//     &log_pub,
-//     &node,
-//     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-//     "logger"));
-
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "====================================\nInitialized Logger");
-//   // RCSOFTCHECK(rclc_executor_spin_one_period(&executor, RCL_MS_TO_NS(10)));
-
-//   // create executor
-//   RCCHECK(rclc_executor_init(&executor, &support.context, 15, &allocator));
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Initialized Executor");
-//   RCSOFTCHECK(rclc_executor_spin_one_period(&executor, RCL_MS_TO_NS(10)));
-
-
-//   RCCHECK(rclc_timer_init_default(
-// 		&timer,
-// 		&support,
-// 		RCL_MS_TO_NS(timer_timeout),
-// 		goal_callback)
-//   );
-//   RCCHECK(rclc_executor_add_timer(&executor, &timer));
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Added goal callback");
-
-  
-//   RCCHECK(
-//     rclc_action_server_init_default(
-//       &action_server,
-//       &node,
-//       &support,
-//       ROSIDL_GET_ACTION_TYPE_SUPPORT(hivepoker_actions, MoveEndEffector),
-//       "move_ee"
-//   ));
-
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Initialized Action Server");
-//   RCSOFTCHECK(rclc_executor_spin_one_period(&executor, RCL_MS_TO_NS(10)));
-
-
-//   RCCHECK(
-//     rclc_executor_add_action_server(
-//       &executor,
-//       &action_server,
-//       1,
-//       ros_goal_request,
-//       sizeof(hivepoker_actions__action__MoveEndEffector_SendGoal_Request),
-//       handle_goal,
-//       handle_cancel,
-//       (void *) &action_server)
-//     );
-
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Added Action Server to Executor");
-//   RCSOFTCHECK(rclc_executor_spin_one_period(&executor, RCL_MS_TO_NS(10)));
-
-//   xTaskCreatePinnedToCore(endstop_task, "EndstopTask", 4096, NULL, 1, &xEndstopTaskHandle, 1);
-//   attachInterrupt(digitalPinToInterrupt(LIMIT), endstop_isr, CHANGE);
-
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Added Endstop Interrupt");
-//   RCSOFTCHECK(rclc_executor_spin_one_period(&executor, RCL_MS_TO_NS(10)));
-
-//   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "System Initialized");
-//   RCSOFTCHECK(rclc_executor_spin_one_period(&executor, RCL_MS_TO_NS(10)));
-
-// }
-
-// void loop() {
-
-//   RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
-
-  
-  
-//   // delay(50);
-
-
-// }
-
-
-
-
-#include <hivepoker_node.hpp>
-
-hivepoker::HivepokerNode node;
-
-
+//SETUP ===============================================================================================================================================
 
 
 void setup() {
 
-  node.setup();
+  //TRANSPORT SETUP ##################################################################################################################
+
+  Serial.begin(115200);
+  set_microros_serial_transports(Serial);  
+  delay(100);
+
+  //NODE SETUP ##################################################################################################################
+  allocator = rcl_get_default_allocator();
+  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+  RCCHECK(rclc_node_init_default(&node, "hivepoker", "", &support));
+  RCCHECK(rclc_executor_init(&executor, &support.context, 15, &allocator));
+
+  //LOGGER SETUP ##################################################################################################################
+  log_msg.data.data = (char * ) malloc(STR_SIZE * sizeof(char));
+  log_msg.data.size = 0;
+  log_msg.data.capacity = STR_SIZE;
+  hivepoker::Logger::setLogLevel(hivepoker::Logger::LogLevel::DEBUG);
+  hivepoker::Logger::setLogCallback(logCallback);
+  RCCHECK(rclc_publisher_init_default(
+    &log_pub,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+    "logger"
+  ));
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized logger");
+
+  // I2C EXTENDER SETUP ##################################################################################################################
+  // Wire.begin(SDA_PIN, SCL_PIN);
+  // bool connection_ok = pcf8575.begin(PCF8575_ADDR, &Wire);
+  // if (connection_ok) {
+  //   hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized I2C Extender");
+  // } else {
+  //   hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Can't connect to I2C Extender.");
+  //   while (1);
+  // }
+  // for (int i = 0; i < 16; i++) {
+  //   pcf8575.pinMode(i, OUTPUT); // Set all pins as OUTPUT
+  // }
+  // pcf8575.digitalWriteWord(0x0000); // Set all pins LOW
+  
+  //STATE PUBLISHER SETUP ##################################################################################################################
+  // RCCHECK(rclc_timer_init_default(
+  //     &timer,
+  //     &support,
+  //     timer_timeout,
+  //     publishState
+  // ));
+  // RCCHECK(rclc_executor_add_timer(&executor, &timer));
+  RCCHECK(rclc_publisher_init_default(
+    &state_publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(hivepoker_interfaces, msg, ArmsPositions),
+    "state"
+  ));
+  // xTaskCreatePinnedToCore(
+  //   publishState,        // Task function
+  //   "StatePublisher",       // Name
+  //   4096,               // Stack size
+  //   NULL,                // Parameter
+  //   2,                   // Priority
+  //   NULL,                 // Task handle,
+  //   0
+  // );
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized state publisher");
+
+  //MOVE SERVICE SETUP ##################################################################################################################
+  RCCHECK(rclc_service_init_default(
+          &move_srv, 
+          &node,
+          ROSIDL_GET_SRV_TYPE_SUPPORT(hivepoker_interfaces, srv, Move), 
+          "move"
+  ));
+  RCCHECK(rclc_executor_add_service(
+          &executor, 
+          &move_srv, 
+          &request_msg_move,
+          &response_msg_move, 
+          move_callback
+  ));
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Added Move Service");
+
+  //STOP SERVICE SETUP ##################################################################################################################
+  RCCHECK(rclc_service_init_default(
+          &stop_srv, 
+          &node,
+          ROSIDL_GET_SRV_TYPE_SUPPORT(hivepoker_interfaces, srv, Stop), 
+          "stop"
+  ));
+  RCCHECK(rclc_executor_add_service(
+          &executor, 
+          &stop_srv, 
+          &request_msg_stop,
+          &response_msg_stop, 
+          stop_callback
+  ));
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Added Stop Service");
+
+
+  //LEFT ENDSTOP SETUP ##################################################################################################################
+  pinMode(LEFT_ENDSTOP_PIN, INPUT_PULLDOWN);
+  xTaskCreatePinnedToCore(left_endstop_task, "LeftEndstopTask", 4096, NULL, 1, &xLeftEndstopTaskHandle, 1);
+  attachInterrupt(digitalPinToInterrupt(LEFT_ENDSTOP_PIN), left_endstop_isr, RISING);
+
+  pinMode(RIGHT_ENDSTOP_PIN, INPUT_PULLDOWN);
+  xTaskCreatePinnedToCore(right_endstop_task, "RightEndstopTask", 4096, NULL, 1, &xRightEndstopTaskHandle, 1);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_ENDSTOP_PIN), right_endstop_isr, RISING);
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Added Endstops Interrupt");
+
+
+
+  //X1 MOTOR SETUP ##################################################################################################################
+  pinMode(X1_RST_PIN, OUTPUT);
+  pinMode(X1_FAULT_PIN, INPUT);
+  pinMode(X1_SLEEP_PIN, OUTPUT);
+
+  digitalWrite(X1_RST_PIN, HIGH);
+  digitalWrite(X1_SLEEP_PIN, LOW);
+
+  x1_driver.connectToPins(X1_STEP_PIN, X1_DIR_PIN);
+  x1_driver.setStepsPerMillimeter(X_STEPS_PER_REVOLUTION / X_MM_TRAVELED_PER_REVOLUTION);
+  x1_driver.setSpeedInMillimetersPerSecond(X_MAX_SPEED);
+  x1_driver.setAccelerationInMillimetersPerSecondPerSecond(X_ACCELERATION);
+  x1_driver.setDecelerationInMillimetersPerSecondPerSecond(X_ACCELERATION);
+  x1_driver.setDirectionToHome(-1);
+  x1_driver.startAsService(0);
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "X1 Motor initialized");
+
+  //Y1 MOTOR SETUP ##################################################################################################################
+  pinMode(Y1_RST_PIN, OUTPUT);
+  pinMode(Y1_FAULT_PIN, INPUT);
+  pinMode(Y1_SLEEP_PIN, OUTPUT);
+
+  digitalWrite(Y1_RST_PIN, HIGH);
+  digitalWrite(Y1_SLEEP_PIN, LOW);
+
+  y1_driver.connectToPins(Y1_STEP_PIN, Y1_DIR_PIN);
+  y1_driver.setStepsPerMillimeter(Y_STEPS_PER_REVOLUTION / Y_MM_TRAVELED_PER_REVOLUTION);
+  y1_driver.setSpeedInMillimetersPerSecond(Y_MAX_SPEED);
+  y1_driver.setAccelerationInMillimetersPerSecondPerSecond(Y_ACCELERATION);
+  y1_driver.setDecelerationInMillimetersPerSecondPerSecond(Y_ACCELERATION);
+  y1_driver.startAsService(0);
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Y1 Motor initialized");
+
+
+
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "System Initialized");
+
 
 }
 
 
 
+
+//LOOP ===============================================================================================================================================
 
 void loop() {
 
-  node.run();
+  RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
+  x1_driver.setSpeedInMillimetersPerSecond(X_MAX_SPEED);
+  y1_driver.setSpeedInMillimetersPerSecond(Y_MAX_SPEED);
+
+  // if (left_endstop_triggered || right_endstop_triggered) {
+  //   hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Endstop Triggered");
+  // }
 
 }
+
+
+
+
+// #include <Wire.h>
+// #include <Adafruit_PCF8575.h>
+
+
+// #define SDA_PIN 4
+// #define SCL_PIN 16
+
+// // PCF8575 I2C address (adjust based on A0–A2 pins)
+// #define PCF8575_ADDR 0x20
+
+// Adafruit_PCF8575 pcf8575;
+
+// void setup() {
+//   Serial.begin(115200);
+
+//   // Start I2C with custom pins
+//   Wire.begin(SDA_PIN, SCL_PIN);
+
+//   // pcf8575 = PCF8575(PCF8575_ADDR, &Wire);
+
+//   // Begin communication with PCF8575
+//   if (pcf8575.begin(PCF8575_ADDR, &Wire)) {
+//     Serial.println("PCF8575 initialized successfully.");
+//   } else {
+//     Serial.println("Failed to initialize PCF8575. Check wiring and address.");
+//     while (1);
+//   }
+
+//   bool value = false;
+
+//   for (int i = 0; i < 16; i++) {
+//     pcf8575.pinMode(i, OUTPUT); // Set all pins as OUTPUT
+//     // pcf8575.digitalWrite(i, value ? HIGH : LOW); // Set all pins LOW
+//     // value = !value; // Toggle value for next pin
+//   }
+
+
+//   pcf8575.digitalWrite(8, HIGH);
+//   pcf8575.digitalWrite(9, LOW);
+//   pcf8575.digitalWrite(10, HIGH);
+
+
+
+//   Serial.println("All pins set HIGH.");
+// }
+
+// void loop() {
+
+// }
