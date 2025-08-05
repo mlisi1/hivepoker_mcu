@@ -6,6 +6,7 @@
 #include <rclc/rclc.h>
 #include <rcutils/logging.h>
 #include <rclc/executor.h>
+#include <rcl/time.h>
 //INTERFACES
 #include <std_msgs/msg/string.h>
 #include <hivepoker_interfaces/msg/arms_positions.h>
@@ -49,7 +50,8 @@ rcl_allocator_t allocator;
 rcl_node_t node;
 rcl_service_t move_srv, stop_srv;
 rcl_timer_t timer;
-const unsigned int timer_timeout =300; //ms
+rcl_clock_t sys_clock;
+const unsigned int timer_timeout = 200; //ms
 std_msgs__msg__String log_msg;
 
 
@@ -59,6 +61,68 @@ volatile bool left_endstop_triggered = false;
 TaskHandle_t xLeftEndstopTaskHandle = NULL;
 volatile bool right_endstop_triggered = false;
 TaskHandle_t xRightEndstopTaskHandle = NULL;
+bool already_stopped = false;
+
+
+
+
+
+//MOVING FUNCTIONS ===============================================================================================================================================
+bool move_x(float x) {
+
+  digitalWrite(X1_SLEEP_PIN, HIGH);
+
+  if (x<=0 && left_endstop_triggered) {
+    hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Left movement not allowed");
+    digitalWrite(X1_SLEEP_PIN, LOW);
+    return false;
+  }
+
+  if (x>=420.0 && right_endstop_triggered) {
+    hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Right movement not allowed");
+    digitalWrite(X1_SLEEP_PIN, LOW);
+    return false;
+  }
+
+  x1_driver.setTargetPositionInMillimeters(-x);
+  state.arm1.state = hivepoker_interfaces__msg__State__MOVING;
+
+  do {
+
+    if (left_endstop_triggered && !already_stopped) {
+      hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Touched Left Endstop, Stopping");
+      x1_driver.emergencyStop();
+      x1_driver.setCurrentPositionInMillimeters(0.0);
+      x1_driver.setCurrentPositionInSteps(0);
+      x1_driver.setCurrentPositionInRevolutions(0);
+      already_stopped = true;
+      break;
+    }  
+    
+    
+    if (right_endstop_triggered && !already_stopped) {
+      hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Touched Right Endstop, Stopping");
+      x1_driver.emergencyStop();
+      already_stopped = true;
+      break;
+    }
+
+    if (state.arm1.pos_x > 1.0 && left_endstop_triggered) {left_endstop_triggered = false; already_stopped = false;}
+    if (state.arm1.pos_x < 420.0 && right_endstop_triggered) {right_endstop_triggered = false; already_stopped = false;}
+
+    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+
+  } while (
+    abs(x1_driver.getDistanceToTargetSigned()) > 0.0
+  );
+
+  digitalWrite(X1_SLEEP_PIN, LOW);
+  return true;
+
+}
+
+
+
 
 
 
@@ -79,6 +143,7 @@ void error_loop(rcl_ret_t err){
 
 // --------------------------------------------------------------------------------------------------------------------------------
 
+
 void move_callback(const void * request_msg, void * response_msg){
   // Cast messages to expected types
   const hivepoker_interfaces__srv__Move_Request * req_in = (const hivepoker_interfaces__srv__Move_Request *)request_msg;
@@ -88,56 +153,67 @@ void move_callback(const void * request_msg, void * response_msg){
 
   state.arm1.state = hivepoker_interfaces__msg__State__MOVING;
 
-  digitalWrite(X1_SLEEP_PIN, HIGH);
-  digitalWrite(Y1_SLEEP_PIN, HIGH);
+  // digitalWrite(X1_SLEEP_PIN, HIGH);
+  // digitalWrite(Y1_SLEEP_PIN, HIGH);
 
-  float x = -req_in->x;
+  float x = req_in->x;
   float y = req_in->y;
 
-  if (x<0 && left_endstop_triggered) {
+
+  bool x_success = move_x(x);
+  if (!x_success) {
     res_in->success = false;
-    return;
+  } else {
+    res_in->success = true;
   }
 
-  if (x>420.0 && right_endstop_triggered) {
-    res_in->success = false;
-    return;
-  }
+  // if (x<=0 && left_endstop_triggered) {
+  //   res_in->success = false;
+  //   digitalWrite(X1_SLEEP_PIN, LOW);
+  //   return;
+  // }
+
+  // if (x>=420.0 && right_endstop_triggered) {
+  //   res_in->success = false;
+  //   digitalWrite(Y1_SLEEP_PIN, LOW);
+  //   return;
+  // }
+  
+
+  // x1_driver.setTargetPositionInMillimeters(req_in->x);
+  // y1_driver.setTargetPositionInMillimeters(req_in->y);
+
+  // do {
+
+  //   if (state.arm1.pos_x > 1.0) {left_endstop_triggered = false; already_stopped = false;}
+  //   if (state.arm1.pos_x < 420.0) {right_endstop_triggered = false; already_stopped = false;}
+
+  //   if (left_endstop_triggered && !already_stopped) {
+  //     x1_driver.emergencyStop();
+  //     x1_driver.setCurrentPositionInMillimeters(0.0);
+  //     x1_driver.setCurrentPositionInSteps(0);
+  //     x1_driver.setCurrentPositionInRevolutions(0);
+  //     already_stopped = true;
+  //   }  
+    
+    
+  //   if (right_endstop_triggered && !already_stopped) {
+  //     x1_driver.emergencyStop();
+  //   }
+
+  //   rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+
+  // } while (
+  //   abs(x1_driver.getDistanceToTargetSigned()) > 0.0 ||
+  //   abs(y1_driver.getDistanceToTargetSigned()) > 0.0
+  // );
+  // state.arm1.state = hivepoker_interfaces__msg__State__IDLE;
+
+  // digitalWrite(X1_SLEEP_PIN, LOW);
+  // digitalWrite(Y1_SLEEP_PIN, LOW);
 
 
-  x1_driver.setTargetPositionInMillimeters(req_in->x);
-  y1_driver.setTargetPositionInMillimeters(req_in->y);
-
-  do {
-
-    left_endstop_triggered = false;
-    right_endstop_triggered = false;
-    // if (left_endstop_triggered) {
-    //   x1_driver.emergencyStop();
-    //   break;
-    // }
-    // if (right_endstop_triggered) {
-    //   x1_driver
-    // }
-    // x1_driver.processMovement();
-    // y1_driver.processMovement();
-    state.arm1.pos_x = x1_driver.getCurrentPositionInMillimeters();
-    state.arm1.pos_y = y1_driver.getCurrentPositionInMillimeters();
-    state.arm1.vel_x = x1_driver.getCurrentVelocityInMillimetersPerSecond();
-    state.arm1.vel_y = y1_driver.getCurrentVelocityInMillimetersPerSecond();
-    RCCHECK(rcl_publish(&state_publisher, &state, NULL));
-
-  } while (
-    abs(x1_driver.getDistanceToTargetSigned()) > 0.0 ||
-    abs(y1_driver.getDistanceToTargetSigned()) > 0.0
-  );
-  state.arm1.state = hivepoker_interfaces__msg__State__IDLE;
-
-  digitalWrite(X1_SLEEP_PIN, LOW);
-  digitalWrite(Y1_SLEEP_PIN, LOW);
-
-
-  res_in->success = true;
+  // res_in->success = true;
 
 }
 
@@ -158,14 +234,23 @@ void stop_callback(const void * request_msg, void * response_msg){
 
 // --------------------------------------------------------------------------------------------------------------------------------
 
-void publishState(rcl_timer_t *timer, int64_t last_call_time) {
+void publishState(rcl_timer_t *timer, int64_t last_call_time) { 
 
-  state.arm1.pos_x = x1_driver.getCurrentPositionInMillimeters();
-  state.arm1.pos_y = y1_driver.getCurrentPositionInMillimeters();
+  if (timer != NULL) {
 
-  RCCHECK(rcl_publish(&state_publisher, &state, NULL));
-  // hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Current position: x=%.2f, y=%.2f", state.arm1.x, state.arm1.y);
-  // vTaskDelay(pdMS_TO_TICKS(200));  // 200 ms delay
+    rcl_time_point_value_t now_ns;
+    RCSOFTCHECK(rcl_clock_get_now(&sys_clock, &now_ns));
+
+    state.header.stamp.sec = now_ns / 1000000000ULL;
+    state.header.stamp.nanosec = now_ns % 1000000000ULL;
+
+    state.arm1.pos_x = -x1_driver.getCurrentPositionInMillimeters();
+    state.arm1.pos_y = y1_driver.getCurrentPositionInMillimeters();
+    state.arm1.vel_x = -x1_driver.getCurrentVelocityInMillimetersPerSecond();
+    state.arm1.vel_y = y1_driver.getCurrentVelocityInMillimetersPerSecond();
+    RCSOFTCHECK(rcl_publish(&state_publisher, &state, NULL));
+
+  }  
 }
 
 
@@ -214,11 +299,12 @@ void left_endstop_task(void *param) {
   while (1) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // Wait for interrupt
     left_endstop_triggered = true;
-    if (!left_endstop_triggered) {
-      x1_driver.emergencyStop();
-      x1_driver.setCurrentPositionInMillimeters(0.0);
-      // enable_left = false;
-    }    
+    // if (!left_endstop_triggered) {
+    //   x1_driver.emergencyStop();
+    //   x1_driver.setCurrentPositionInMillimeters(0.0);
+    //   x1_driver.setCurrentPositionInSteps(0);
+    //   x1_driver.setCurrentPositionInRevolutions(0);
+    // }    
     // hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Left Endstop Triggered");
     // RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
 
@@ -264,12 +350,17 @@ void setup() {
   Serial.begin(115200);
   set_microros_serial_transports(Serial);  
   delay(100);
+  //Wait for the agent
+  while (RMW_RET_OK != rmw_uros_ping_agent(100, 10)) {
+    delay(100);
+  }  
 
   //NODE SETUP ##################################################################################################################
   allocator = rcl_get_default_allocator();
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
   RCCHECK(rclc_node_init_default(&node, "hivepoker", "", &support));
   RCCHECK(rclc_executor_init(&executor, &support.context, 15, &allocator));
+  RCCHECK(rcl_clock_init(RCL_SYSTEM_TIME, &sys_clock, &allocator));
 
   //LOGGER SETUP ##################################################################################################################
   log_msg.data.data = (char * ) malloc(STR_SIZE * sizeof(char));
@@ -300,28 +391,23 @@ void setup() {
   // pcf8575.digitalWriteWord(0x0000); // Set all pins LOW
   
   //STATE PUBLISHER SETUP ##################################################################################################################
-  // RCCHECK(rclc_timer_init_default(
-  //     &timer,
-  //     &support,
-  //     timer_timeout,
-  //     publishState
-  // ));
-  // RCCHECK(rclc_executor_add_timer(&executor, &timer));
+  hivepoker_interfaces__msg__ArmsPositions__init(&state);
+  state.header.frame_id.data = NULL;
+  state.header.frame_id.capacity = 0;
+  state.header.frame_id.size = 0;
   RCCHECK(rclc_publisher_init_default(
     &state_publisher,
     &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(hivepoker_interfaces, msg, ArmsPositions),
     "state"
   ));
-  // xTaskCreatePinnedToCore(
-  //   publishState,        // Task function
-  //   "StatePublisher",       // Name
-  //   4096,               // Stack size
-  //   NULL,                // Parameter
-  //   2,                   // Priority
-  //   NULL,                 // Task handle,
-  //   0
-  // );
+  RCCHECK(rclc_timer_init_default(
+      &timer,
+      &support,
+      RCL_MS_TO_NS(timer_timeout),
+      publishState
+  ));
+  RCCHECK(rclc_executor_add_timer(&executor, &timer));
   hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized state publisher");
 
   //MOVE SERVICE SETUP ##################################################################################################################
