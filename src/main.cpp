@@ -22,7 +22,7 @@
 #include <pthread.h>
 #include <logger.h>
 //HARDWARE
-#include <pin_definitions.h>
+#include <new_pin_definitions.h>
 #include <parameters.h>
 
 
@@ -53,6 +53,7 @@ rcl_timer_t timer;
 rcl_clock_t sys_clock;
 const unsigned int timer_timeout = 200; //ms
 std_msgs__msg__String log_msg;
+bool ready = false;
 
 
 
@@ -70,17 +71,17 @@ bool already_stopped = false;
 //MOVING FUNCTIONS ===============================================================================================================================================
 bool move_x(float x) {
 
-  digitalWrite(X1_SLEEP_PIN, HIGH);
+  pcf8575.digitalWrite(X1_SLEEP_PIN, HIGH);
 
   if (x<=0 && left_endstop_triggered) {
     hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Left movement not allowed");
-    digitalWrite(X1_SLEEP_PIN, LOW);
+    pcf8575.digitalWrite(X1_SLEEP_PIN, LOW);
     return false;
   }
 
   if (x>=420.0 && right_endstop_triggered) {
     hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Right movement not allowed");
-    digitalWrite(X1_SLEEP_PIN, LOW);
+    pcf8575.digitalWrite(X1_SLEEP_PIN, LOW);
     return false;
   }
 
@@ -116,11 +117,71 @@ bool move_x(float x) {
     abs(x1_driver.getDistanceToTargetSigned()) > 0.0
   );
 
-  digitalWrite(X1_SLEEP_PIN, LOW);
+  pcf8575.digitalWrite(X1_SLEEP_PIN, LOW);
   return true;
 
 }
 
+
+
+
+
+bool move_y(float y) {
+
+  pcf8575.digitalWrite(Y1_SLEEP_PIN, HIGH);
+
+
+  if (y<Y_MIN_VALUE_MM) {
+    hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Down movement not allowed");
+    pcf8575.digitalWrite(Y1_SLEEP_PIN, LOW);
+    return false;
+  }
+
+  if (y>=Y_MAX_VALUE_MM) {
+    hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Up movement not allowed");
+    pcf8575.digitalWrite(Y1_SLEEP_PIN, LOW);
+    return false;
+  }
+
+  y1_driver.setTargetPositionInMillimeters(-y);
+  state.arm1.state = hivepoker_interfaces__msg__State__MOVING;
+
+  do {
+
+    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+
+  } while (
+    abs(y1_driver.getDistanceToTargetSigned()) > 0.0
+  );
+
+  pcf8575.digitalWrite(Y1_SLEEP_PIN, LOW);
+  return true;
+
+}
+
+
+
+void homing_arm1() {
+
+  delay(500);
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Performing homing procedure");
+  pcf8575.digitalWrite(X1_SLEEP_PIN, HIGH);
+  x1_driver.setTargetPositionInMillimeters(1000);
+
+  while (!left_endstop_triggered) {
+  } 
+  x1_driver.emergencyStop();
+  already_stopped = true;
+  x1_driver.setCurrentPositionInMillimeters(0.0);
+  x1_driver.setCurrentPositionInSteps(0);
+  x1_driver.setCurrentPositionInRevolutions(0.0);
+  x1_driver.setCurrentPositionAsHomeAndStop();
+  state.arm1.pos_x = 0.0;
+
+  pcf8575.digitalWrite(X1_SLEEP_PIN, LOW);
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Homing procedure completed!");
+
+}
 
 
 
@@ -159,6 +220,14 @@ void move_callback(const void * request_msg, void * response_msg){
   float x = req_in->x;
   float y = req_in->y;
 
+  if (-y1_driver.getCurrentPositionInMillimeters() >= 1.0) {
+
+    hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Received Move Request: x=%.2f", abs(-x1_driver.getCurrentPositionInMillimeters()-x));
+    if (!((abs(-x1_driver.getCurrentPositionInMillimeters()-x)) < 5.0)) {
+      move_y(0.0);
+    }
+  }
+
 
   bool x_success = move_x(x);
   if (!x_success) {
@@ -167,53 +236,15 @@ void move_callback(const void * request_msg, void * response_msg){
     res_in->success = true;
   }
 
-  // if (x<=0 && left_endstop_triggered) {
-  //   res_in->success = false;
-  //   digitalWrite(X1_SLEEP_PIN, LOW);
-  //   return;
-  // }
 
-  // if (x>=420.0 && right_endstop_triggered) {
-  //   res_in->success = false;
-  //   digitalWrite(Y1_SLEEP_PIN, LOW);
-  //   return;
-  // }
-  
+  bool y_success = move_y(y);
 
-  // x1_driver.setTargetPositionInMillimeters(req_in->x);
-  // y1_driver.setTargetPositionInMillimeters(req_in->y);
+  if (!y_success) {
+    res_in->success = false;
+  } else {
+    res_in->success = true;
+  }
 
-  // do {
-
-  //   if (state.arm1.pos_x > 1.0) {left_endstop_triggered = false; already_stopped = false;}
-  //   if (state.arm1.pos_x < 420.0) {right_endstop_triggered = false; already_stopped = false;}
-
-  //   if (left_endstop_triggered && !already_stopped) {
-  //     x1_driver.emergencyStop();
-  //     x1_driver.setCurrentPositionInMillimeters(0.0);
-  //     x1_driver.setCurrentPositionInSteps(0);
-  //     x1_driver.setCurrentPositionInRevolutions(0);
-  //     already_stopped = true;
-  //   }  
-    
-    
-  //   if (right_endstop_triggered && !already_stopped) {
-  //     x1_driver.emergencyStop();
-  //   }
-
-  //   rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
-
-  // } while (
-  //   abs(x1_driver.getDistanceToTargetSigned()) > 0.0 ||
-  //   abs(y1_driver.getDistanceToTargetSigned()) > 0.0
-  // );
-  // state.arm1.state = hivepoker_interfaces__msg__State__IDLE;
-
-  // digitalWrite(X1_SLEEP_PIN, LOW);
-  // digitalWrite(Y1_SLEEP_PIN, LOW);
-
-
-  // res_in->success = true;
 
 }
 
@@ -299,15 +330,6 @@ void left_endstop_task(void *param) {
   while (1) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // Wait for interrupt
     left_endstop_triggered = true;
-    // if (!left_endstop_triggered) {
-    //   x1_driver.emergencyStop();
-    //   x1_driver.setCurrentPositionInMillimeters(0.0);
-    //   x1_driver.setCurrentPositionInSteps(0);
-    //   x1_driver.setCurrentPositionInRevolutions(0);
-    // }    
-    // hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Left Endstop Triggered");
-    // RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
-
   }
 }
 
@@ -318,11 +340,7 @@ void right_endstop_task(void *param) {
     right_endstop_triggered = true;
     if (!right_endstop_triggered) {
       x1_driver.emergencyStop();
-      // x1_driver.setCurrentPositionInMillimeters(-420.0);
-      // enable_right = false;
     }    
-    // hivepoker::Logger::log(hivepoker::Logger::LogLevel::WARNING, "Right Endstop Triggered");
-    // RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
 
   }
 }
@@ -377,18 +395,18 @@ void setup() {
   hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized logger");
 
   // I2C EXTENDER SETUP ##################################################################################################################
-  // Wire.begin(SDA_PIN, SCL_PIN);
-  // bool connection_ok = pcf8575.begin(PCF8575_ADDR, &Wire);
-  // if (connection_ok) {
-  //   hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized I2C Extender");
-  // } else {
-  //   hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Can't connect to I2C Extender.");
-  //   while (1);
-  // }
-  // for (int i = 0; i < 16; i++) {
-  //   pcf8575.pinMode(i, OUTPUT); // Set all pins as OUTPUT
-  // }
-  // pcf8575.digitalWriteWord(0x0000); // Set all pins LOW
+  Wire.begin(SDA_PIN, SCL_PIN);
+  bool connection_ok = pcf8575.begin(PCF8575_ADDR, &Wire);
+  if (connection_ok) {
+    hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized I2C Extender");
+  } else {
+    hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Can't connect to I2C Extender.");
+    while (1);
+  }
+  for (int i = 0; i < 16; i++) {
+    pcf8575.pinMode(i, OUTPUT); // Set all pins as OUTPUT
+  }
+  pcf8575.digitalWriteWord(0x0000); // Set all pins LOW
   
   //STATE PUBLISHER SETUP ##################################################################################################################
   hivepoker_interfaces__msg__ArmsPositions__init(&state);
@@ -456,12 +474,12 @@ void setup() {
 
 
   //X1 MOTOR SETUP ##################################################################################################################
-  pinMode(X1_RST_PIN, OUTPUT);
+  // pinMode(X1_RST_PIN, OUTPUT);
   pinMode(X1_FAULT_PIN, INPUT);
-  pinMode(X1_SLEEP_PIN, OUTPUT);
+  // pinMode(X1_SLEEP_PIN, OUTPUT);
 
-  digitalWrite(X1_RST_PIN, HIGH);
-  digitalWrite(X1_SLEEP_PIN, LOW);
+  pcf8575.digitalWrite(X1_RST_PIN, HIGH);
+  pcf8575.digitalWrite(X1_SLEEP_PIN, LOW);
 
   x1_driver.connectToPins(X1_STEP_PIN, X1_DIR_PIN);
   x1_driver.setStepsPerMillimeter(X_STEPS_PER_REVOLUTION / X_MM_TRAVELED_PER_REVOLUTION);
@@ -473,12 +491,12 @@ void setup() {
   hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "X1 Motor initialized");
 
   //Y1 MOTOR SETUP ##################################################################################################################
-  pinMode(Y1_RST_PIN, OUTPUT);
+  // pinMode(Y1_RST_PIN, OUTPUT);
   pinMode(Y1_FAULT_PIN, INPUT);
-  pinMode(Y1_SLEEP_PIN, OUTPUT);
+  // pinMode(Y1_SLEEP_PIN, OUTPUT);
 
-  digitalWrite(Y1_RST_PIN, HIGH);
-  digitalWrite(Y1_SLEEP_PIN, LOW);
+  pcf8575.digitalWrite(Y1_RST_PIN, HIGH);
+  pcf8575.digitalWrite(Y1_SLEEP_PIN, LOW);
 
   y1_driver.connectToPins(Y1_STEP_PIN, Y1_DIR_PIN);
   y1_driver.setStepsPerMillimeter(Y_STEPS_PER_REVOLUTION / Y_MM_TRAVELED_PER_REVOLUTION);
@@ -489,7 +507,10 @@ void setup() {
   hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Y1 Motor initialized");
 
 
+  homing_arm1();
+  delay(500);
 
+  ready = true;
   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "System Initialized");
 
 
@@ -502,7 +523,13 @@ void setup() {
 
 void loop() {
 
-  RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
+  if (ready) {
+        RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
+  } else {
+      // Still initializing or waiting for a trigger
+  }
+
+  
   x1_driver.setSpeedInMillimetersPerSecond(X_MAX_SPEED);
   y1_driver.setSpeedInMillimetersPerSecond(Y_MAX_SPEED);
 
