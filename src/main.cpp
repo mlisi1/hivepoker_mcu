@@ -18,7 +18,7 @@
 //I2C EXTENDER
 #include <Wire.h>
 #include <Adafruit_PCF8575.h>
-//SEPPERS
+//STEPPERS
 #include <ESP_FlexyStepper.h>
 //MISC
 #include <pthread.h>
@@ -427,32 +427,37 @@ void trajectory_callback(const void * request_msg, void * response_msg){
         if (!success) {
           hivepoker::Logger::log(hivepoker::Logger::LogLevel::ERROR, "Trajecctory points not feasible, ignoring..");
           res_in->success = false;
-          break;
+          x1_driver.setSpeedInMillimetersPerSecond(X_MAX_SPEED);
+          y1_driver.setSpeedInMillimetersPerSecond(Y_MAX_SPEED);
+          pcf8575.digitalWrite(X1_SLEEP_PIN, LOW);
+          pcf8575.digitalWrite(Y1_SLEEP_PIN, LOW);
+          return;
         }
     }
 
+
+    float x = start_x + req_in->x.data[0];
+    float y = start_y + req_in->y.data[0];
+
+    x1_driver.setTargetPositionInMillimeters(-x);
+    y1_driver.setTargetPositionInMillimeters(-y);
+
     for (size_t i = 0; i < req_in->x.size; i++) {
 
-      float x = start_x + req_in->x.data[i];
-      float y = start_y + req_in->y.data[i];
-      x1_driver.setTargetPositionInMillimeters(-x);
+      x = start_x + req_in->x.data[i];
+      y = start_y + req_in->y.data[i];
 
-      // do {
-      // } while (
-      //   (abs(x1_driver.getDistanceToTargetSigned()) > 10.0)
-      // );
+      do
+      {
+        x1_driver.setTargetPositionInMillimeters(-x);
+        y1_driver.setTargetPositionInMillimeters(-y);
 
-      y1_driver.setTargetPositionInMillimeters(-y);
-
-      // do {
-      // } while (
-      //   (abs(y1_driver.getDistanceToTargetSigned()) > 10.0)
-      // );
-      delay(5);
-
-    }
-
- 
+      } while (
+        abs(x1_driver.getDistanceToTargetSigned()) > 0.0 ||
+        abs(y1_driver.getDistanceToTargetSigned()) > 0.0
+      );
+      
+    } 
 
 
     x1_driver.setSpeedInMillimetersPerSecond(X_MAX_SPEED);

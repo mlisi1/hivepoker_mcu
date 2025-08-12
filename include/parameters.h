@@ -21,8 +21,7 @@
 #define Y_MAX_SPEED                             70.0 // mm/s
 #define Y_ACCELERATION                          10000.0 //mm/s²
 
-#define X_MIN_PULSEWIDTH                        2 // microseconds
-#define Y_MIN_PULSEWIDTH                        2 // microseconds
+
 
 #endif
 
