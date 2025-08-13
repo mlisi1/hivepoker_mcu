@@ -11,7 +11,7 @@
 #define X_MAX_VALUE_MM                          500.0
 #define X_ZERO_OFFSET_MM                        0.0
 
-#define Y_MIN_VALUE_MM                          -500.0
+#define Y_MIN_VALUE_MM                          0.0
 #define Y_MAX_VALUE_MM                          95.0
 #define Y_ZERO_OFFSET_MM                        0.0
 
