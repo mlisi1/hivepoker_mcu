@@ -321,13 +321,13 @@ void move_callback(const void * msgin){
   hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Received Move Request: x=%.2f, y=%.2f", x, y);
 
 
-  if (-y1_driver.getCurrentPositionInMillimeters() >= 1.0) {
+  // if (-y1_driver.getCurrentPositionInMillimeters() >= 1.0) {
 
-    if (!((abs(-x1_driver.getCurrentPositionInMillimeters()-x)) < 5.0)) {
-      homing_y();
-    }
+  //   if (!((abs(-x1_driver.getCurrentPositionInMillimeters()-x)) < 5.0)) {
+  //     homing_y();
+  //   }
 
-  }
+  // }
 
 
   if (msg->position.data[0] == -1.0) {
