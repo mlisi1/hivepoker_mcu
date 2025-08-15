@@ -13,6 +13,7 @@
 //INTERFACES
 #include <std_msgs/msg/string.h>
 #include <sensor_msgs/msg/joint_state.h>
+#include <geometry_msgs/msg/pose_stamped.h>
 #include <sb_msgs/msg/hivepoker_status.h>
 #include "rosidl_runtime_c/primitives_sequence.h"
 //I2C EXTENDER
@@ -45,7 +46,7 @@ Adafruit_PCF8575 pcf8575;
 //MICROROS DEFINITIONS ===============================================================================================================================================
 rcl_publisher_t state_publisher, log_pub, status_pub;
 rclc_executor_t executor;
-rcl_subscription_t target_position_sub, duhram_position_sub;
+rcl_subscription_t target_position_sub, vicon_position_sub;
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
@@ -56,6 +57,7 @@ const unsigned int health_timer_timeout = 1000; //ms
 std_msgs__msg__String log_msg;
 sensor_msgs__msg__JointState state_msg, target_msg;
 sb_msgs__msg__HivepokerStatus status_msg;
+geometry_msgs__msg__PoseStamped vicon_msg;
 bool ready = false;
 
 
@@ -76,6 +78,9 @@ bool already_stopped_x, already_stopped_y = false;
 //MOVING UTILS ===============================================================================================================================================
 float start_x = 0.0;
 float start_y = 0.0;
+float whycode_offset_x = 0.0;
+float whycode_offset_y = 0.0;
+bool first_whycode_message = false;
 
 
 
@@ -299,8 +304,16 @@ void move_callback(const void * msgin){
   // Cast messages to expected types
   const sensor_msgs__msg__JointState * msg = (const sensor_msgs__msg__JointState *)msgin;
   
-  float x = msg->position.data[0] * 1000;
-  float y = msg->position.data[1] * 1000;
+  float x = (msg->position.data[0] + whycode_offset_x) * 1000 ;
+  float y = (msg->position.data[1] + whycode_offset_y) * 1000 ;
+
+  float acceleration_x = msg->effort.data[0] * 1000;
+  float acceleration_y = msg->effort.data[1] * 1000;
+
+  x1_driver.setAccelerationInMillimetersPerSecondPerSecond(acceleration_x);
+  y1_driver.setAccelerationInMillimetersPerSecondPerSecond(acceleration_y);
+  x1_driver.setDecelerationInMillimetersPerSecondPerSecond(acceleration_x);
+  y1_driver.setDecelerationInMillimetersPerSecondPerSecond(acceleration_y);
 
   x1_driver.setSpeedInMillimetersPerSecond(msg->velocity.data[0] * 1000);
   y1_driver.setSpeedInMillimetersPerSecond(msg->velocity.data[1] * 1000);
@@ -310,7 +323,6 @@ void move_callback(const void * msgin){
 
   if (-y1_driver.getCurrentPositionInMillimeters() >= 1.0) {
 
-    hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Received Move Request: x=%.2f", abs(-x1_driver.getCurrentPositionInMillimeters()-x));
     if (!((abs(-x1_driver.getCurrentPositionInMillimeters()-x)) < 5.0)) {
       homing_y();
     }
@@ -318,7 +330,7 @@ void move_callback(const void * msgin){
   }
 
 
-  if (x == 0.0) {
+  if (msg->position.data[0] == -1.0) {
 
     homing_x();
 
@@ -328,14 +340,52 @@ void move_callback(const void * msgin){
 
   }
 
+
+  if (msg->position.data[1] == -1.0) {
+
+    homing_y();
+
+  } else {
+
+    bool y_success = move_y_arm1(y);
+
+  }
   
-  bool y_success = move_y_arm1(y);
+}
 
-    
+// --------------------------------------------------------------------------------------------------------------------------------
+
+void vicon_callback(const void * msgin) {
+
+  const geometry_msgs__msg__PoseStamped * msg = (const geometry_msgs__msg__PoseStamped *) msgin;
+
+  // if (!first_whycode_message) {
+
+  float current_x = -x1_driver.getCurrentPositionInMillimeters() / 1000;
+  float current_y = -y1_driver.getCurrentPositionInMillimeters() / 1000;
+
+  float whycode_x = msg->pose.position.x;
+  float whycode_y = msg->pose.position.y;
+
+  whycode_offset_x = current_x - whycode_x;
+  whycode_offset_y = current_y - whycode_y;
+
+  // first_whycode_message = false;
+
+  // }
+
+  // float x = msg->pose.position.x / 1000;
+  // float y = msg->pose.position.y / 1000;
+
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Received Whycode position. The X offset is %.4f", whycode_offset_x);
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::INFO, "Received Whycode position. The Y offset is %.4f", whycode_offset_y);
 
 
+  // x1_driver.setCurrentPositionInMillimeters(- (whycode_offset_x + x/1000));
+  // y1_driver.setCurrentPositionInMillimeters(-y/1000);
 
 }
+
 
 // --------------------------------------------------------------------------------------------------------------------------------
 
@@ -349,10 +399,10 @@ void publishState(rcl_timer_t *timer, int64_t last_call_time) {
     state_msg.header.stamp.sec = now_ns / 1000000000ULL;
     state_msg.header.stamp.nanosec = now_ns % 1000000000ULL;
 
-    state_msg.position.data[0] = -x1_driver.getCurrentPositionInMillimeters() * 1000;
-    state_msg.position.data[1] = -y1_driver.getCurrentPositionInMillimeters() * 1000;
-    state_msg.velocity.data[0] = -x1_driver.getCurrentVelocityInMillimetersPerSecond() * 1000;
-    state_msg.velocity.data[1] = -y1_driver.getCurrentVelocityInMillimetersPerSecond() * 1000;
+    state_msg.position.data[0] = -(x1_driver.getCurrentPositionInMillimeters() / 1000 + whycode_offset_x);
+    state_msg.position.data[1] = -(y1_driver.getCurrentPositionInMillimeters() / 1000 + whycode_offset_y);
+    state_msg.velocity.data[0] = -x1_driver.getCurrentVelocityInMillimetersPerSecond() / 1000;
+    state_msg.velocity.data[1] = -y1_driver.getCurrentVelocityInMillimetersPerSecond() / 1000;
     RCSOFTCHECK(rcl_publish(&state_publisher, &state_msg, NULL));
 
     status_msg.header.stamp.sec = now_ns / 1000000000ULL;
@@ -606,6 +656,24 @@ void setup() {
     &target_position_sub, 
     &target_msg,
     &move_callback, 
+    ON_NEW_DATA
+  ));
+  hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized target position subscriber");
+
+
+  //VICON POSITION SUBSCRIBER SETUP ##################################################################################################################
+  geometry_msgs__msg__PoseStamped__init(&vicon_msg);
+  RCCHECK(rclc_subscription_init_default(
+    &vicon_position_sub,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, PoseStamped),
+    VICON_POSITION_TOPIC
+  ));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, 
+    &vicon_position_sub, 
+    &vicon_msg,
+    &vicon_callback, 
     ON_NEW_DATA
   ));
   hivepoker::Logger::log(hivepoker::Logger::LogLevel::DEBUG, "Initialized target position subscriber");
