@@ -1,5 +1,5 @@
 repositories:
-  hivepoker_actions:
+  common_interfaces:
     type: git
-    url: https://github.com/mlisi1/hivepoker_interfaces
-    version: main
+    url: https://github.com/ros2/common_interfaces
+    version: humble
